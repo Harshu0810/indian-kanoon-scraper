@@ -1,105 +1,110 @@
 import os
 import time
-import uuid
+import sys
+import signal
 
 from selenium import webdriver
-from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from webdriver_manager.chrome import ChromeDriverManager
 
-SEARCH_URL = "https://indiankanoon.org/search/?formInput=doctypes:supremecourt%20year:2025"
-DOWNLOAD_DIR = os.path.join(os.getcwd(), "pdfs")
+HEADLESS = False
+START_YEAR = 2025
+END_YEAR = 2000
 
-def get_driver():
+WAIT = 20
+
+BASE_DIR = os.getcwd()
+BASE_PDF_DIR = os.path.join(BASE_DIR, "pdfs")
+os.makedirs(BASE_PDF_DIR, exist_ok=True)
+
+driver = None
+
+def handle_exit(sig, frame):
+    print("\n🛑 Stopped by user")
+    if driver:
+        driver.quit()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, handle_exit)
+
+
+def get_driver(download_dir):
     options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
+
+    if HEADLESS:
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1920,1080")
 
     prefs = {
-        "download.default_directory": DOWNLOAD_DIR,
+        "download.default_directory": download_dir,
         "download.prompt_for_download": False,
         "plugins.always_open_pdf_externally": True,
+
+        "profile.managed_default_content_settings.images": 2,
+
+        "profile.managed_default_content_settings.stylesheets": 2,
     }
     options.add_experimental_option("prefs", prefs)
 
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
+    return webdriver.Chrome(options=options)
 
+def crawl():
+    global driver
 
-def collect_case_links(driver):
-    print("🔍 Collecting case links...")
-    driver.get(SEARCH_URL)
+    for year in range(START_YEAR, END_YEAR - 1, -1):
+        print(f"\n🗓️ YEAR {year}")
 
-    wait = WebDriverWait(driver, 40)
+        year_dir = os.path.join(BASE_PDF_DIR, str(year))
+        os.makedirs(year_dir, exist_ok=True)
 
-    wait.until(
-        EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "span.results-count")
+        driver = get_driver(year_dir)
+        wait = WebDriverWait(driver, WAIT)
+
+        search_url = (
+            f"https://indiankanoon.org/search/"
+            f"?formInput=doctypes:supremecourt year:{year}"
         )
-    )
+        driver.get(search_url)
 
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(3)
+        while True:
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "article.result")))
+            articles = driver.find_elements(By.CSS_SELECTOR, "article.result")
 
-    articles = driver.find_elements(By.CSS_SELECTOR, "article.result")
-    print(f"📄 Articles detected in DOM: {len(articles)}")
+            print(f"📄 Page with {len(articles)} cases")
 
-    links = []
-    for article in articles:
-        try:
-            doc_links = article.find_elements(By.CSS_SELECTOR, "a.cite_tag")
-            for a in doc_links:
-                href = a.get_attribute("href")
-                if href and "/doc/" in href:
-                    links.append(href)
-        except:
-            continue
+            for i in range(len(articles)):
+                articles = driver.find_elements(By.CSS_SELECTOR, "article.result")
+                link = articles[i].find_element(By.CSS_SELECTOR, "h4.result_title a")
 
-    print(f"✅ Found {len(links)} case links")
-    return list(set(links))
+                driver.execute_script("arguments[0].click();", link)
+                wait.until(lambda d: "search" not in d.current_url)
 
-def save_html(driver, title):
-    safe = title.replace("/", "_").replace("\\", "_")[:80]
-    filename = f"{safe}_{uuid.uuid4().hex[:6]}.html"
-    path = os.path.join(DOWNLOAD_DIR, filename)
+                try:
+                    pdf_btn = wait.until(
+                        EC.element_to_be_clickable((By.ID, "pdfdoc"))
+                    )
+                    pdf_btn.click()
+                    time.sleep(2)
+                except:
+                    pass
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(driver.page_source)
-
-    print(f"💾 Saved: {filename}")
-
-
-def crawl_case_pdfs():
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    driver = get_driver()
-
-    try:
-        links = collect_case_links(driver)
-
-        for i, link in enumerate(links, start=1):
-            print(f"\n[{i}/{len(links)}] Visiting {link}")
-            driver.get(link)
-            time.sleep(4)
+                driver.back()
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "article.result")))
 
             try:
-                title = driver.find_element(By.TAG_NAME, "h1").text
+                next_btn = driver.find_element(By.LINK_TEXT, "Next")
+                driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(1)
             except:
-                title = f"case_{i}"
+                print(f"✅ Year {year} completed")
+                break
 
-            save_html(driver, title)
-            time.sleep(1)
-
-    finally:
         driver.quit()
-        print("\n✅ DONE. Files saved in:", DOWNLOAD_DIR)
 
+    print("\n🎯 ALL YEARS COMPLETED")
 
 if __name__ == "__main__":
-    crawl_case_pdfs()
+    crawl()
