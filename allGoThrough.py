@@ -14,8 +14,8 @@ from domainClassifier import infer_domain_for_paragraph
 
 # ================= CONFIG =================
 
-START_YEAR = 2025
-END_YEAR = 2025              
+START_YEAR = 2022
+END_YEAR = 2023              
 MAX_CASES_TEST = None        # previously set to 5 for quick test
 
 BASE_DIR = Path(__file__).resolve().parent
