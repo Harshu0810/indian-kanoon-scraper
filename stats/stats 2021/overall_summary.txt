@@ -1,0 +1,4 @@
+Total paragraphs: 24469
+Total cases: 400
+Domains found: 8
+Average confidence: 0.47
