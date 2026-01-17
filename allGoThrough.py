@@ -1,110 +1,97 @@
-import os
-import time
-import sys
-import signal
+from pathlib import Path
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+
+from smartCrawl import get_case_urls_for_year
+from inputCrawl import extract_english_paragraphs
+from domainClassifier import infer_domain_for_paragraph
 
 
-HEADLESS = False
+# ================= CONFIG =================
+
 START_YEAR = 2025
-END_YEAR = 2000
+END_YEAR = 2025              
+MAX_CASES_TEST = None        # previously set to 5 for quick test
 
-WAIT = 20
-
-BASE_DIR = os.getcwd()
-BASE_PDF_DIR = os.path.join(BASE_DIR, "pdfs")
-os.makedirs(BASE_PDF_DIR, exist_ok=True)
-
-driver = None
-
-def handle_exit(sig, frame):
-    print("\n🛑 Stopped by user")
-    if driver:
-        driver.quit()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, handle_exit)
+BASE_DIR = Path(__file__).resolve().parent
+PARQUET_DIR = BASE_DIR / "parquet"
+PARQUET_DIR.mkdir(exist_ok=True)
 
 
-def get_driver(download_dir):
+# ================= DRIVER =================
+
+def build_driver():
     options = Options()
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
 
-    if HEADLESS:
-        options.add_argument("--headless=new")
-        options.add_argument("--window-size=1920,1080")
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options,
+    )
+    return driver
 
-    prefs = {
-        "download.default_directory": download_dir,
-        "download.prompt_for_download": False,
-        "plugins.always_open_pdf_externally": True,
 
-        "profile.managed_default_content_settings.images": 2,
+# ================= PARQUET =================
 
-        "profile.managed_default_content_settings.stylesheets": 2,
-    }
-    options.add_experimental_option("prefs", prefs)
+def write_parquet(year, rows):
+    if not rows:
+        print("⚠ No rows to write")
+        return
 
-    return webdriver.Chrome(options=options)
+    table = pa.Table.from_pylist(rows)
+    out = PARQUET_DIR / f"sci_{year}.parquet"
+    pq.write_table(table, out, compression="snappy")
+    print(f"✅ Parquet written: {out}")
 
-def crawl():
-    global driver
 
-    for year in range(START_YEAR, END_YEAR - 1, -1):
-        print(f"\n🗓️ YEAR {year}")
+# ================= MAIN =================
 
-        year_dir = os.path.join(BASE_PDF_DIR, str(year))
-        os.makedirs(year_dir, exist_ok=True)
+def main():
+    driver = build_driver()
 
-        driver = get_driver(year_dir)
-        wait = WebDriverWait(driver, WAIT)
+    try:
+        for year in range(START_YEAR, END_YEAR + 1):
+            print(f"\n===== YEAR {year} =====")
 
-        search_url = (
-            f"https://indiankanoon.org/search/"
-            f"?formInput=doctypes:supremecourt year:{year}"
-        )
-        driver.get(search_url)
+            case_urls = get_case_urls_for_year(driver, year)
 
-        while True:
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "article.result")))
-            articles = driver.find_elements(By.CSS_SELECTOR, "article.result")
+            if MAX_CASES_TEST:
+                case_urls = case_urls[:MAX_CASES_TEST]
 
-            print(f"📄 Page with {len(articles)} cases")
+            rows = []
 
-            for i in range(len(articles)):
-                articles = driver.find_elements(By.CSS_SELECTOR, "article.result")
-                link = articles[i].find_element(By.CSS_SELECTOR, "h4.result_title a")
+            for idx, case_url in enumerate(case_urls, start=1):
+                print(f"[{idx}/{len(case_urls)}] {case_url}")
 
-                driver.execute_script("arguments[0].click();", link)
-                wait.until(lambda d: "search" not in d.current_url)
+                driver.get(case_url)
 
-                try:
-                    pdf_btn = wait.until(
-                        EC.element_to_be_clickable((By.ID, "pdfdoc"))
-                    )
-                    pdf_btn.click()
-                    time.sleep(2)
-                except:
-                    pass
+                english_paras, case_id, _, _ = extract_english_paragraphs(driver)
 
-                driver.back()
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "article.result")))
+                for para_no, para in enumerate(english_paras, start=1):
+                    domain, confidence = infer_domain_for_paragraph(para)
 
-            try:
-                next_btn = driver.find_element(By.LINK_TEXT, "Next")
-                driver.execute_script("arguments[0].click();", next_btn)
-                time.sleep(1)
-            except:
-                print(f"✅ Year {year} completed")
-                break
+                    rows.append({
+                        "Case_ID": case_id,
+                        "Case_URL": case_url,
+                        "Year": year,
+                        "Para_No": para_no,
+                        "English_Text": para,
+                        "Primary_Domain": domain,
+                        "Domain_Confidence": confidence,
+                        "Hindi_Status": "Unavailable"
+                    })
 
+            write_parquet(year, rows)
+
+    finally:
         driver.quit()
 
-    print("\n🎯 ALL YEARS COMPLETED")
 
 if __name__ == "__main__":
-    crawl()
+    main()

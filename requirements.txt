@@ -2,3 +2,6 @@ selenium==4.39.0
 webdriver-manager==4.0.2
 beautifulsoup4
 requests
+pytesseract
+pdf2image
+Pillow
